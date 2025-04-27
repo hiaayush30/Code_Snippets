@@ -33,9 +33,12 @@ async function connectDb() {
     if (!cached.promise) {
         const options = {
             bufferCommands: true,
+            // tells Mongoose to queue up operations on your models if the connection to 
+            // MongoDB hasn't been established yet.
             maxPoolSIze: 10
         }
-        cached.promise = mongoose.connect(process.env.MONGODB_URI as string, options).then((mongoose) => {
+        cached.promise = mongoose.connect(process.env.MONGODB_URI as string, options)
+            .then((mongoose) => {
             return mongoose.connection;
         });
     }
