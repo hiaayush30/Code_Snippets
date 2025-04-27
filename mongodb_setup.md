@@ -55,3 +55,9 @@ async function connectDb() {
 
 export default connectDb;
 ```    
+
+- models/user.model.ts
+
+```typescript
+const User = mongoose.models['User'] ? mongoose.models['User'] : mongoose.model<IUser>('User', userSchema);
+```
