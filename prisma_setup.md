@@ -1,0 +1,1 @@
+## Setting up prisma in Next.js
