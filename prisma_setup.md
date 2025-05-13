@@ -19,3 +19,6 @@ export default prisma;
 if (process.env.NODE_ENV !== "production") globalThis.prismaGlobal = prisma;
 ```
 
+- npm i prisma
+- npx prisma generate
+- npx prisma migrate dev
