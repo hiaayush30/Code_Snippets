@@ -55,3 +55,5 @@
 **Next.js and the Edge:**
 
 When we say "Next.js runs on the edge," it doesn't necessarily mean your *entire* Next.js application is duplicated across a massive number of individual, full-fledged servers. Instead, it's more about **deploying specific parts of your application's logic to a distributed network of lightweight compute instances located geographically close to users.**
+
+---
