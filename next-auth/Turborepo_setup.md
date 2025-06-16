@@ -1,346 +1,667 @@
-Implementing authentication for pages in Next.js within a Turborepo monorepo involves several key considerations, particularly around where to place your authentication logic and how to share it across multiple Next.js applications if you have them.
+Excellent! Setting up `next-auth` in a Next.js app within a Turborepo, especially with a shared `db` package and separate API servers (HTTP/WS), is a common and robust pattern.
 
-Here's a breakdown of common strategies and how to apply them in a Turborepo setup:
+Here's a comprehensive guide on how to implement `next-auth` in your `nextjs` app, leveraging your existing `db` package and considering the Turborepo structure:
 
-### Core Concepts of Authentication in Next.js
+### 1. Prerequisites and Assumptions
 
-Before diving into Turborepo specifics, let's review Next.js authentication fundamentals:
+* **Turborepo Setup:** You have a working Turborepo with:
+    * `apps/nextjs-app` (your Next.js application)
+    * `packages/db` (your Prisma client or ORM setup)
+    * `apps/http-server` (your Express.js HTTP server) - *Note: NextAuth typically handles its own API routes for authentication, so you might not need to involve your Express HTTP server directly for NextAuth's core auth flow.*
+    * `apps/ws-server` (your Express.js WS server) - *Not directly relevant for NextAuth core, but good to note for future WebSocket auth.*
+* **`@repo/db/client`:** You've correctly set up and exported `prismaClient` (or your ORM instance) from your `db` package, as seen in your `authOptions` code.
+* **TypeScript:** Assumed, given your previous questions.
 
-1.  **Authentication Provider/Strategy:**
-    * **Custom Backend (JWT/Session Cookies):** You handle user registration, login, and token/session management yourself on a custom backend (e.g., Node.js with Express, Python/Django, etc.). Your Next.js app communicates with this backend.
-    * **NextAuth.js (Auth.js):** A popular open-source solution that abstracts away much of the complexity. It supports various providers (Google, GitHub, credentials, etc.) and handles sessions, JWTs, and callbacks. Highly recommended for most projects.
-    * **Third-Party Auth Services:** Firebase Auth, Auth0, Clerk, Supabase Auth, etc. These are managed services that handle almost all authentication logic for you.
+### 2. Install NextAuth
 
-2.  **Session Management:**
-    * **Stateless (JWTs):** A JSON Web Token is issued by the server upon successful login and stored on the client (e.g., in `localStorage` or `httpOnly` cookies). The client sends this token with subsequent requests to protected API routes, and the server validates it.
-    * **Stateful (Session Cookies):** The server creates a session and stores its ID in a cookie on the client. The server then stores the actual session data (user ID, etc.) in a database or in-memory store.
+First, install `next-auth` in your Next.js app:
 
-3.  **Authorization:**
-    * **Middleware:** Next.js Middleware (especially with the App Router) runs before a request completes and can be used to protect routes by redirecting unauthenticated users. This is for optimistic checks.
-    * **Server Components/Server-Side Rendering (SSR) / `getServerSideProps` (Pages Router):** Fetching user session/token on the server and rendering different UI or redirecting based on authentication status. More secure checks.
-    * **Client Components/`useEffect`:** Fetching user session/token on the client and conditionally rendering content or redirecting.
+```bash
+cd apps/nextjs-app
+pnpm add next-auth
+# or yarn add next-auth
+# or npm install next-auth
+```
 
-### Authentication in a Turborepo
+### 3. Create/Configure Your `auth` Package (Recommended)
 
-A Turborepo typically involves multiple `apps/` (like `apps/web`, `apps/admin`) and `packages/` (like `packages/ui`, `packages/auth`).
+While you *can* put `authOptions` directly in `apps/nextjs-app`, it's a Turborepo best practice to create a dedicated `packages/auth` (or similar) for shared authentication logic, especially if you foresee other apps (like your `http-server`) needing similar authentication or session validation.
 
-The key is to decide:
-* **Where does your authentication logic live?**
-* **How do you share state (user session/token) between Next.js apps or across pages?**
+**a. Create `packages/auth`:**
 
-#### Option 1: Using NextAuth.js (Recommended)
+```bash
+mkdir packages/auth
+cd packages/auth
+pnpm init # or yarn init or npm init -y
+```
 
-NextAuth.js is excellent for monorepos because it provides a unified way to handle authentication.
+**b. Install Dependencies in `packages/auth`:**
 
-**Structure in Turborepo:**
+```bash
+pnpm add next-auth @prisma/client bcryptjs
+pnpm add -D prisma typescript
+```
+*(You might already have `@prisma/client` in `packages/db`, but `next-auth` might list it as a peer dep, and `bcryptjs` is explicitly needed for password hashing.)*
 
-1.  **`packages/auth` (or `packages/next-auth-config`):**
-    * Create a dedicated package to house your NextAuth.js configuration.
-    * This package would export the `authOptions` object (containing providers, callbacks, etc.) that your Next.js apps will use.
-    * Example `packages/auth/index.ts`:
-        ```typescript
-        // packages/auth/index.ts
-        import NextAuth from "next-auth";
-        import CredentialsProvider from "next-auth/providers/credentials";
-        // import GoogleProvider from "next-auth/providers/google";
-        // import { verifyCredentials } from './utils'; // Your backend validation function
+**c. Configure `packages/auth/nextAuth.ts` (Your `authOptions`):**
 
-        export const authOptions = {
-            providers: [
-                CredentialsProvider({
-                    name: "Credentials",
-                    credentials: {
-                        email: { label: "Email", type: "email" },
-                        password: { label: "Password", type: "password" }
-                    },
-                    async authorize(credentials, req) {
-                        // This is where you call your custom backend API to verify credentials
-                        // Example:
-                        // const res = await fetch("http://localhost:8000/api/user/login", {
-                        //     method: "POST",
-                        //     headers: { "Content-Type": "application/json" },
-                        //     body: JSON.stringify({ email: credentials.email, password: credentials.password }),
-                        // });
-                        // const user = await res.json();
+This is where your `authOptions` (from your previous question) will reside.
 
-                        // For demonstration, use dummy user
-                        if (credentials.email === "test@example.com" && credentials.password === "password") {
-                            return { id: "1", name: "Test User", email: "test@example.com" };
-                        }
-                        return null; // Return null if user cannot be found/verified
-                    },
-                }),
-                // Add other providers like GoogleProvider, GitHubProvider etc.
-            ],
-            // Optional: Define pages for signin, error etc.
-            pages: {
-                signIn: '/auth/signin',
-                error: '/auth/error',
+**`packages/auth/nextAuth.ts`**
+
+```typescript
+import CredentialsProvider from "next-auth/providers/credentials";
+import { NextAuthOptions, User as NextAuthUser } from "next-auth";
+import { prismaClient } from "@repo/db/client"; // Import from your shared DB package
+import bcrypt from "bcryptjs";
+
+// Ensure your Prisma User model has 'id', 'email', 'password' (hashed), 'name', 'photo'
+// And that 'id' is a number/Int if not already string.
+
+export const authOptions: NextAuthOptions = {
+    providers: [
+        CredentialsProvider({
+            name: "Credentials",
+            credentials: {
+                email: { label: "Email", type: "email", placeholder: "email" },
+                password: { label: "Password", type: "password", placeholder: "password" }
             },
-            // Optional: Configure session strategy (default is jwt)
-            session: {
-                strategy: "jwt",
-            },
-            callbacks: {
-                async jwt({ token, user, account, profile }) {
-                    // Persist the OAuth access_token and or the user id to the token right after signin
-                    if (account) {
-                        token.accessToken = account.access_token;
-                        token.id = user.id; // Store user ID
-                    }
-                    return token;
-                },
-                async session({ session, token }) {
-                    // Send properties to the client, like an access_token from a provider.
-                    session.accessToken = token.accessToken;
-                    session.user.id = token.id; // Expose user ID to client session
-                    return session;
-                },
-            },
-            // Add a secret for JWT encryption. Generate a strong one: openssl rand -base64 32
-            secret: process.env.NEXTAUTH_SECRET,
-            debug: process.env.NODE_ENV === 'development',
-        };
-
-        // Export NextAuth handler directly if this package is just for config
-        export default NextAuth(authOptions);
-        ```
-
-2.  **Next.js App (`apps/web`, `apps/admin`):**
-    * **API Route for NextAuth.js:** Each Next.js app needs its own `pages/api/auth/[...nextauth].ts` (Pages Router) or `app/api/auth/[...nextauth]/route.ts` (App Router) to handle NextAuth.js requests.
-        ```typescript
-        // apps/web/pages/api/auth/[...nextauth].ts (Pages Router)
-        // or apps/web/app/api/auth/[...nextauth]/route.ts (App Router)
-        import { authOptions } from '@repo/auth'; // Import from your shared package
-        import NextAuth from 'next-auth';
-
-        export default NextAuth(authOptions);
-        ```
-    * **Session Provider:** Wrap your root `_app.js` (Pages Router) or `layout.tsx` (App Router) with `SessionProvider` from `next-auth/react`.
-        ```tsx
-        // apps/web/pages/_app.tsx (Pages Router)
-        import type { AppProps } from 'next/app';
-        import { SessionProvider } from 'next-auth/react';
-
-        function MyApp({ Component, pageProps: { session, ...pageProps } }: AppProps) {
-          return (
-            <SessionProvider session={session}>
-              <Component {...pageProps} />
-            </SessionProvider>
-          );
-        }
-        export default MyApp;
-
-        // apps/web/app/layout.tsx (App Router)
-        import { SessionProvider } from './SessionProvider'; // A custom client component wrapper for SessionProvider
-        import './globals.css'; // Your global styles
-
-        export default function RootLayout({
-          children,
-        }: {
-          children: React.ReactNode;
-        }) {
-          return (
-            <html lang="en">
-              <body>
-                <SessionProvider>{children}</SessionProvider>
-              </body>
-            </html>
-          );
-        }
-
-        // apps/web/app/SessionProvider.tsx (Client component for App Router)
-        'use client';
-        import { SessionProvider } from 'next-auth/react';
-        export default SessionProvider;
-        ```
-    * **Protecting Pages/Routes:**
-        * **Client-Side:** Use `useSession()` hook in React components.
-            ```tsx
-            import { useSession } from 'next-auth/react';
-            import { useRouter } from 'next/navigation'; // or 'next/router' for Pages Router
-
-            function Dashboard() {
-              const { data: session, status } = useSession();
-              const router = useRouter();
-
-              if (status === 'loading') {
-                return <div>Loading...</div>;
-              }
-
-              if (status === 'unauthenticated') {
-                router.push('/auth/signin');
-                return null;
-              }
-
-              return (
-                <div>
-                  <h1>Welcome, {session.user.name}!</h1>
-                  <p>You are authenticated.</p>
-                </div>
-              );
-            }
-            ```
-        * **Server-Side (App Router - Route Handlers / Server Components):** Use `auth()` from `next-auth` (if using NextAuth v5+) or `getServerSession` (older versions) or `cookies().get('next-auth.session-token')`.
-            ```typescript
-            // apps/web/app/dashboard/page.tsx (Server Component in App Router)
-            import { auth } from '@/auth'; // Adjust path based on your setup
-
-            export default async function DashboardPage() {
-              const session = await auth(); // Get session on the server
-
-              if (!session) {
-                // Redirect unauthenticated users
-                // You might need to use `redirect` from 'next/navigation'
-                // This would be better handled by Middleware for entire routes
-                return <div>Not authenticated. Please sign in.</div>;
-              }
-
-              return (
-                <div>
-                  <h1>Server Welcome, {session.user.name}!</h1>
-                  <p>This content is protected.</p>
-                </div>
-              );
-            }
-            ```
-        * **Middleware (App Router recommended):** Create `middleware.ts` at the root of your Next.js app (e.g., `apps/web/middleware.ts`). This is powerful for protecting entire route groups.
-            ```typescript
-            // apps/web/middleware.ts
-            import { NextResponse } from 'next/server';
-            import type { NextRequest } from 'next/server';
-            import { auth } from '@repo/auth'; // Import your auth config (NextAuth.js v5+)
-
-            // Define protected routes (regex or array)
-            const protectedRoutes = ['/dashboard', '/settings', '/api/protected'];
-            const publicRoutes = ['/auth/signin', '/auth/signup', '/'];
-
-            export default async function middleware(req: NextRequest) {
-              const { pathname } = req.nextUrl;
-
-              // Check if the current path is a public route
-              if (publicRoutes.includes(pathname) || pathname.startsWith('/_next')) {
-                return NextResponse.next();
-              }
-
-              // Authenticate the user
-              const session = await auth(); // Using auth() from NextAuth.js v5+
-
-              // If user is not authenticated and trying to access a protected route
-              if (!session && protectedRoutes.some(route => pathname.startsWith(route))) {
-                const signInUrl = new URL('/auth/signin', req.url);
-                signInUrl.searchParams.set('callbackUrl', pathname); // Optional: redirect back after login
-                return NextResponse.redirect(signInUrl);
-              }
-
-              // If authenticated, allow access
-              return NextResponse.next();
-            }
-
-            // Define which paths the middleware should run on
-            export const config = {
-              // Match all routes except static files, _next, and public images
-              matcher: ['/((?!_next/static|_next/image|favicon.ico|.*\\.png$).*)'],
-            };
-            ```
-
-#### Option 2: Custom JWT/Session Implementation
-
-If you prefer a custom solution (e.g., you already have a backend authentication service):
-
-1.  **Backend:** Your backend handles user login, generates JWTs, and sets them in `httpOnly` cookies (recommended for security) or sends them in the response body for `localStorage` storage.
-2.  **Shared `packages/auth-utils`:**
-    * Create a package like `packages/auth-utils` that contains utility functions for:
-        * Storing/retrieving tokens from `localStorage` or cookies.
-        * Helper functions for making authenticated API requests.
-        * Context providers (React Context API) to manage authentication state across your Next.js apps.
-3.  **Next.js App (`apps/web`, `apps/admin`):**
-    * **Login Page:** On your login page, you'd send credentials to your backend.
-    * **Store Token:** Upon successful login, store the JWT in `localStorage` or a cookie.
-    * **Protecting Pages:**
-        * **Client-Side:** In `_app.js` or `layout.tsx`, or in individual components, check for the presence of the token. If absent, redirect.
-            ```typescript
-            // Client-side component example
-            import { useEffect, useState } from 'react';
-            import { useRouter } from 'next/navigation'; // or 'next/router'
-
-            function ProtectedPage() {
-              const [isLoading, setIsLoading] = useState(true);
-              const router = useRouter();
-
-              useEffect(() => {
-                const token = localStorage.getItem('authToken'); // Or read from cookie
-                if (!token) {
-                  router.push('/login'); // Redirect to login
-                } else {
-                  // Optionally, validate token with backend or decode it
-                  setIsLoading(false);
+            async authorize(credentials, _req) { // _req for correct signature
+                if (!credentials?.email || !credentials.password) {
+                    return null; // Invalid credentials
                 }
-              }, [router]);
+                try {
+                    const user = await prismaClient.user.findFirst({
+                        where: {
+                            email: credentials.email
+                        }
+                    });
 
-              if (isLoading) {
-                return <div>Loading authentication...</div>;
-              }
+                    if (!user) {
+                        return null; // User not found
+                    }
 
-              return (
-                <div>
-                  <h1>Welcome to the protected area!</h1>
-                </div>
-              );
+                    const verifyPassword = await bcrypt.compare(credentials.password, user.password);
+
+                    if (!verifyPassword) {
+                        return null; // Incorrect password
+                    }
+
+                    // Map your Prisma user to NextAuth's User type
+                    const authorizedUser: NextAuthUser = {
+                        id: user.id.toString(), // CRITICAL: NextAuth expects id as a string
+                        email: user.email,
+                        name: user.name || null, // Handle potential null/undefined
+                        image: user.photo || null, // Map your 'photo' to NextAuth's 'image'
+                    };
+
+                    return authorizedUser;
+
+                } catch (error) {
+                    console.error('Auth Error', error);
+                    return null;
+                }
             }
-            ```
-        * **Server-Side (`getServerSideProps` for Pages Router, Middleware/Server Components for App Router):** This is crucial for truly protected routes and better SEO.
-            ```typescript
-            // Pages Router example: pages/protected.tsx
-            import { GetServerSideProps } from 'next';
-
-            export const getServerSideProps: GetServerSideProps = async (context) => {
-              const token = context.req.cookies.authToken; // Get token from server-side request cookies
-
-              if (!token) {
-                return {
-                  redirect: {
-                    destination: '/login',
-                    permanent: false,
-                  },
-                };
-              }
-
-              // Optionally: Validate token with your backend API
-              // const res = await fetch('http://your-backend.com/api/validate-token', {
-              //   headers: { Authorization: `Bearer ${token}` }
-              // });
-              // if (!res.ok) {
-              //   return { redirect: { destination: '/login', permanent: false } };
-              // }
-
-              return {
-                props: {}, // Pass data to the page if needed
-              };
-            };
-
-            function ProtectedPage() {
-              return <div>This is a server-protected page.</div>;
+        })
+        // Add other providers here if needed (e.g., GoogleProvider, GitHubProvider)
+        // For example:
+        /*
+        GoogleProvider({
+            clientId: process.env.GOOGLE_CLIENT_ID!,
+            clientSecret: process.env.GOOGLE_CLIENT_SECRET!
+        }),
+        */
+    ],
+    session: {
+        strategy: "jwt",
+        maxAge: 20 * 24 * 60 * 60 // 20 days (NextAuth default is 30 days)
+    },
+    callbacks: {
+        async jwt({ token, user }) { // No need for 'account' and 'profile' here unless using OAuth
+            if (user) { // user is only available on first sign-in
+                token.id = user.id;
+                token.email = user.email;
+                token.name = user.name;
+                token.picture = user.image; // Map user.image to token.picture
             }
-            export default ProtectedPage;
-            ```
-            For the App Router, you'd use Middleware and checks within Server Components.
+            return token;
+        },
+        async session({ session, token }) {
+            // Ensure these properties are correctly typed in next-auth.d.ts
+            if (token.id) {
+                session.user.id = token.id;
+            }
+            if (token.email) {
+                session.user.email = token.email;
+            }
+            if (token.name) {
+                session.user.name = token.name;
+            }
+            if (token.picture) {
+                session.user.image = token.picture;
+            }
+            // If you had other custom fields on the token, add them here
+            return session;
+        }
+    },
+    pages: {
+        signIn: '/login', // Your custom login page
+        error: '/login'   // Redirect errors to login page
+    },
+    secret: process.env.NEXTAUTH_SECRET, // Must be set in .env
+    debug: process.env.NODE_ENV === "development", // Enable debug logs in dev
+};
+```
 
-### Key Turborepo Benefits for Auth:
+**d. Extend NextAuth Types (`packages/auth/next-auth.d.ts`):**
 
-* **Shared Code:** By placing common authentication logic (like NextAuth.js config, or custom auth utilities) in a `packages/` directory, you avoid duplicating code across your Next.js apps.
-* **Centralized Configuration:** All apps consume the same authentication rules and providers.
-* **Easier Updates:** Update your `packages/auth` package, and all apps that depend on it get the updates.
-* **Monorepo Benefits:** Faster builds and caching with Turborepo for your auth package.
+This is crucial for TypeScript to understand your custom `id`, `photo`/`image`, and any other fields you add to the session and JWT token.
 
-### Summary Steps:
+**`packages/auth/next-auth.d.ts`**
 
-1.  **Choose an Auth Strategy:** NextAuth.js is generally recommended for its features and community support.
-2.  **Create Shared Auth Package:** Make a `packages/auth` (or similar) to house your common authentication logic and configurations.
-3.  **Integrate into Next.js Apps:**
-    * Set up API routes for authentication.
-    * Wrap your apps with a session provider.
-    * Implement client-side and server-side (using Middleware or `getServerSideProps`/Server Components) protection.
-4.  **Environment Variables:** Remember to manage environment variables (like `NEXTAUTH_SECRET`, API keys, backend URLs) in your Turborepo's root `.env` file or within each app's `.env` if they differ, and ensure they are exposed correctly.
+```typescript
+import NextAuth, { DefaultSession } from "next-auth";
+import { JWT } from "next-auth/jwt";
 
-Implementing authentication is a critical part of any application, so take your time to understand the chosen method and its security implications.
+declare module "next-auth" {
+  /**
+   * Returned by `useSession`, `getSession` and received as a prop on the `SessionProvider` React Context
+   */
+  interface Session {
+    user: {
+      id: string; // Add id to user
+      email: string;
+      name: string;
+      image: string; // Default NextAuth property for image
+      // Add other custom properties you expect on the session user
+      // role?: string; // Example for a custom role field
+    } & DefaultSession["user"];
+  }
+
+  /**
+   * The shape of the user object returned in the `authorize` function (via CredentialsProvider)
+   * This is NextAuth's internal User type.
+   */
+  interface User {
+    id: string; // Crucial: Must be string for NextAuth
+    email: string;
+    name?: string | null; // Optional and nullable
+    image?: string | null; // Optional and nullable, used for avatar/photo
+    // Any other properties returned from authorize must be included here
+  }
+}
+
+declare module "next-auth/jwt" {
+  /**
+   * Returned by the `jwt` callback and `getToken`, when using JWT sessions
+   */
+  interface JWT {
+    id: string; // Ensure id is string in JWT
+    email: string;
+    name?: string | null; // Optional and nullable
+    picture?: string | null; // Use 'picture' for the image URL in JWT
+    // Any other custom properties you store in the token
+    // role?: string; // Example for a custom role field
+  }
+}
+```
+
+**e. Add `packages/auth` to `tsconfig.json` of your `nextjs-app`:**
+
+In `apps/nextjs-app/tsconfig.json`, ensure you have a `paths` mapping for `@repo/auth`:
+
+```json
+// apps/nextjs-app/tsconfig.json
+{
+  "extends": "../../tsconfig.json", // Or your base tsconfig
+  "compilerOptions": {
+    "plugins": [
+      {
+        "name": "next"
+      }
+    ],
+    "lib": ["dom", "dom.iterable", "esnext"],
+    "allowJs": true,
+    "skipLibCheck": true,
+    "strict": false,
+    "forceConsistentCasingInFileNames": true,
+    "noEmit": true,
+    "incremental": true,
+    "esModuleInterop": true,
+    "module": "esnext",
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "jsx": "preserve",
+    "paths": {
+      "@/*": ["./src/*"],
+      "@repo/auth/*": ["../../packages/auth/*"], // Add this line
+      "@repo/db/*": ["../../packages/db/*"]    // Assuming you already have this
+    }
+  },
+  "include": ["next-env.d.ts", "**/*.ts", "**/*.tsx", ".next/types/**/*.ts"],
+  "exclude": ["node_modules"]
+}
+```
+
+### 4. Configure Your Next.js App (`apps/nextjs-app`)
+
+**a. Create `pages/api/auth/[...nextauth].ts` (or `app/api/auth/[...nextauth]/route.ts` for App Router):**
+
+This is NextAuth's catch-all API route.
+
+**For Pages Router (`pages/api/auth/[...nextauth].ts`):**
+
+```typescript
+// apps/nextjs-app/pages/api/auth/[...nextauth].ts
+import NextAuth from "next-auth";
+import { authOptions } from "@repo/auth/nextAuth"; // Import from your auth package
+
+export default NextAuth(authOptions);
+```
+
+**For App Router (`app/api/auth/[...nextauth]/route.ts`):**
+
+```typescript
+// apps/nextjs-app/app/api/auth/[...nextauth]/route.ts
+import NextAuth from "next-auth";
+import { authOptions } from "@repo/auth/nextAuth"; // Import from your auth package
+
+const handler = NextAuth(authOptions);
+
+export { handler as GET, handler as POST };
+```
+
+**b. Wrap Your App with `SessionProvider`:**
+
+This makes the session available to all components.
+
+**For Pages Router (`pages/_app.tsx`):**
+
+```tsx
+// apps/nextjs-app/pages/_app.tsx
+import type { AppProps } from 'next/app';
+import { SessionProvider } from 'next-auth/react';
+
+function MyApp({ Component, pageProps: { session, ...pageProps } }: AppProps) {
+  return (
+    <SessionProvider session={session}>
+      <Component {...pageProps} />
+    </SessionProvider>
+  );
+}
+
+export default MyApp;
+```
+
+**For App Router (`app/layout.tsx`):**
+
+```tsx
+// apps/nextjs-app/app/layout.tsx
+import { SessionProvider } from './SessionProvider'; // Create this client component
+import './globals.css'; // Your global styles
+
+export default function RootLayout({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
+  return (
+    <html lang="en">
+      <body>
+        <SessionProvider>{children}</SessionProvider>
+      </body>
+    </html>
+  );
+}
+
+// apps/nextjs-app/app/SessionProvider.tsx (create this file)
+// This must be a client component
+'use client';
+
+import { SessionProvider } from 'next-auth/react';
+import React from 'react';
+
+interface Props {
+  children: React.ReactNode;
+}
+
+export function SessionProvider({ children }: Props) {
+  return <NextAuthSessionProvider>{children}</NextAuthSessionProvider>;
+}
+```
+
+**c. Create Your Login Page (`pages/login.tsx` or `app/login/page.tsx`):**
+
+This will be your custom login page where users enter credentials.
+
+**For Pages Router (`pages/login.tsx`):**
+
+```tsx
+// apps/nextjs-app/pages/login.tsx
+import { useState } from 'react';
+import { signIn } from 'next-auth/react';
+import { useRouter } from 'next/router';
+
+export default function LoginPage() {
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [error, setError] = useState('');
+  const router = useRouter();
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError(''); // Clear previous errors
+
+    const result = await signIn('credentials', {
+      redirect: false, // Don't redirect automatically
+      email,
+      password,
+      // You can pass the callbackUrl here if you want NextAuth to handle it
+      // callbackUrl: router.query.callbackUrl as string || '/dashboard',
+    });
+
+    if (result?.error) {
+      setError(result.error);
+    } else if (result?.ok) {
+      // Manually redirect to dashboard or callbackUrl
+      router.push((router.query.callbackUrl as string) || '/dashboard');
+    }
+  };
+
+  return (
+    <div>
+      <h1>Login</h1>
+      <form onSubmit={handleSubmit}>
+        {error && <p style={{ color: 'red' }}>{error}</p>}
+        <div>
+          <label htmlFor="email">Email:</label>
+          <input
+            type="email"
+            id="email"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            required
+          />
+        </div>
+        <div>
+          <label htmlFor="password">Password:</label>
+          <input
+            type="password"
+            id="password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            required
+          />
+        </div>
+        <button type="submit">Sign In</button>
+      </form>
+      <p>
+        Don't have an account? <a href="/signup">Sign Up</a>
+      </p>
+    </div>
+  );
+}
+```
+
+**For App Router (`app/login/page.tsx`):**
+
+```tsx
+// apps/nextjs-app/app/login/page.tsx
+'use client'; // This is a client component
+
+import { useState } from 'react';
+import { signIn } from 'next-auth/react';
+import { useRouter, useSearchParams } from 'next/navigation'; // Use next/navigation for App Router
+
+export default function LoginPage() {
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [error, setError] = useState('');
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const callbackUrl = searchParams.get('callbackUrl') || '/dashboard';
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError('');
+
+    const result = await signIn('credentials', {
+      redirect: false,
+      email,
+      password,
+    });
+
+    if (result?.error) {
+      setError(result.error);
+    } else if (result?.ok) {
+      router.push(callbackUrl);
+    }
+  };
+
+  return (
+    <div>
+      <h1>Login</h1>
+      <form onSubmit={handleSubmit}>
+        {error && <p style={{ color: 'red' }}>{error}</p>}
+        <div>
+          <label htmlFor="email">Email:</label>
+          <input
+            type="email"
+            id="email"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            required
+          />
+        </div>
+        <div>
+          <label htmlFor="password">Password:</label>
+          <input
+            type="password"
+            id="password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            required
+          />
+        </div>
+        <button type="submit">Sign In</button>
+      </form>
+      <p>
+        Don't have an account? <a href="/signup">Sign Up</a>
+      </p>
+    </div>
+  );
+}
+```
+
+**d. Implement Signup Page (`pages/signup.tsx` or `app/signup/page.tsx`):**
+
+You'll need a signup page that creates a new user in your database using your `db` package. This typically involves making an API call to your Next.js app (e.g., `/api/register`).
+
+**Example `/api/register` (for Pages or App Router):**
+
+```typescript
+// apps/nextjs-app/pages/api/register.ts (or app/api/register/route.ts for App Router)
+import type { NextApiRequest, NextApiResponse } from 'next';
+import { prismaClient } from '@repo/db/client';
+import bcrypt from 'bcryptjs';
+
+export default async function handler(req: NextApiRequest, res: NextApiResponse) {
+  if (req.method !== 'POST') {
+    return res.status(405).json({ message: 'Method Not Allowed' });
+  }
+
+  const { email, password, name } = req.body;
+
+  if (!email || !password || !name) {
+    return res.status(400).json({ message: 'Email, password, and name are required' });
+  }
+
+  try {
+    const existingUser = await prismaClient.user.findUnique({
+      where: { email },
+    });
+
+    if (existingUser) {
+      return res.status(409).json({ message: 'User with this email already exists' });
+    }
+
+    const hashedPassword = await bcrypt.hash(password, 10); // Hash the password
+
+    const newUser = await prismaClient.user.create({
+      data: {
+        email,
+        password: hashedPassword, // Store the hashed password
+        name,
+        // photo: '', // Add a default photo if needed
+      },
+    });
+
+    // You might choose to automatically sign them in after registration
+    // Or redirect them to the login page
+    return res.status(201).json({ message: 'User registered successfully', user: newUser.email });
+  } catch (error) {
+    console.error('Registration Error:', error);
+    return res.status(500).json({ message: 'Internal server error' });
+  }
+}
+```
+
+Your `signup.tsx` (or `app/signup/page.tsx`) would then call this API route.
+
+**e. Implement Protected Routes/Pages:**
+
+Now, you can use `useSession` to protect components or pages.
+
+```tsx
+// apps/nextjs-app/pages/dashboard.tsx (or app/dashboard/page.tsx)
+'use client'; // If using App Router
+
+import { useSession, signOut } from 'next-auth/react';
+import { useEffect } from 'react';
+import { useRouter } from 'next/router'; // For Pages Router
+// import { useRouter } from 'next/navigation'; // For App Router
+
+export default function DashboardPage() {
+  const { data: session, status } = useSession();
+  const router = useRouter();
+
+  useEffect(() => {
+    if (status === 'unauthenticated') {
+      // Redirect to login if not authenticated
+      router.push('/login');
+    }
+  }, [status, router]);
+
+  if (status === 'loading') {
+    return <div>Loading session...</div>;
+  }
+
+  if (session) {
+    return (
+      <div>
+        <h1>Welcome to your Dashboard, {session.user?.name || session.user?.email}!</h1>
+        <p>Your ID: {session.user?.id}</p>
+        {session.user?.image && <img src={session.user.image} alt="User" width={50} height={50} />}
+        <button onClick={() => signOut()}>Sign Out</button>
+      </div>
+    );
+  }
+
+  return null; // Should redirect before this is rendered if unauthenticated
+}
+```
+
+### 5. Environment Variables
+
+Create a `.env.local` file in your `apps/nextjs-app` directory:
+
+```
+# apps/nextjs-app/.env.local
+NEXTAUTH_SECRET="YOUR_VERY_LONG_RANDOM_STRING_HERE" # Generate with `openssl rand -base64 32` or similar
+# If using Google Provider:
+# GOOGLE_CLIENT_ID="your_google_client_id"
+# GOOGLE_CLIENT_SECRET="your_google_client_secret"
+# Add any other provider credentials here
+```
+**Important:** Your `NEXTAUTH_SECRET` must be strong and kept secret.
+
+### 6. Middleware (`apps/nextjs-app/middleware.ts`)
+
+You've already provided excellent middleware code. Just make sure it points to your `authOptions` correctly:
+
+```typescript
+// apps/nextjs-app/middleware.ts
+import { NextResponse } from 'next/server';
+import type { NextRequest } from 'next/server';
+import { authOptions } from '@repo/auth/nextAuth'; // Correct import path
+import { getServerSession } from 'next-auth';
+
+// Define protected routes (regex or array)
+const protectedRoutes = ['/dashboard', '/settings', '/api/protected'];
+const publicRoutes = ['/', '/login', '/signup'];
+
+export default async function middleware(req: NextRequest) {
+    const { pathname } = req.nextUrl;
+
+    // getServerSession needs the Request and Response objects in middleware
+    // Refer to NextAuth.js middleware documentation for the correct way to get session
+    // This typically involves passing req and res (from context) or using auth().
+    // For Next.js 13+ App Router, auth() from next-auth/react is used or a custom setup.
+    // However, the `getServerSession` directly in middleware as you have it can be problematic
+    // due to how `req` and `res` are handled.
+
+    // A more common pattern for Next.js middleware with NextAuth is:
+    // 1. Use `auth()` from `next-auth/middleware` (NextAuth v5/Auth.js)
+    // 2. Or check `req.cookies` for the session token and manually verify (more complex)
+    // 3. Or, for Pages Router or specific setups, pass `req` and `res` to getServerSession
+
+    // Let's assume you're on a setup where getServerSession is intended to work like this
+    // If you face issues with session always being null, this is the first place to check.
+    const session = await getServerSession(authOptions); // This line is the potential point of failure if not configured right for middleware
+
+    // Check if the current path is a public route
+    if (publicRoutes.includes(pathname)) {
+        if ((pathname == "/login" || pathname == "/signup") && session?.user) {
+            const dashboardUrl = new URL("/dashboard", req.url);
+            return NextResponse.redirect(dashboardUrl);
+        }
+        return NextResponse.next();
+    }
+
+    // Authenticate the user
+
+    // If user is not authenticated and trying to access a protected route
+    if (!session && protectedRoutes.some(route => pathname.startsWith(route))) {
+        const signInUrl = new URL('/login', req.url);
+        signInUrl.searchParams.set('callbackUrl', pathname);
+        return NextResponse.redirect(signInUrl);
+    }
+
+    // If authenticated, allow access
+    return NextResponse.next();
+}
+
+export const config = {
+    matcher: ['/((?!_next/static|_next/image|favicon.ico|.*\\.png$).*)'],
+};
+```
+**Important Note on `getServerSession` in Middleware:**
+While `getServerSession` *can* be used in middleware for older Next.js versions or specific setups, Next.js's middleware environment is different from API routes. If you're using Next.js 13+ App Router, the recommended approach for authentication in middleware is often to use the `auth` export directly from `next-auth/middleware` (if using NextAuth v5/Auth.js) or a custom session validation based on cookies.
+
+Your current `getServerSession(authOptions)` might work if `authOptions` implicitly handles the request context, but it's a common area of confusion. If `session` is *always* `null` in middleware, that's the first thing to investigate. For most cases, the provided code should work for Pages Router. For App Router, you might need to adapt.
+
+### Summary of Flow:
+
+1.  **User Visits Protected Route:** Middleware intercepts.
+2.  **Middleware Checks Session:** Calls `getServerSession`.
+3.  **No Session:** Middleware redirects to `/login` (with `callbackUrl`).
+4.  **User on `/login`:** Enters credentials.
+5.  **`signIn('credentials', ...)` is Called:** Sends request to `/api/auth/callback/credentials`.
+6.  **NextAuth API Route Handles:** Calls your `authorize` function in `packages/auth/nextAuth.ts`.
+7.  **`authorize` Authenticates:** Verifies credentials against `prismaClient`. Returns a `User` object if successful.
+8.  **NextAuth Creates JWT:** Puts user info into the JWT (`jwt` callback).
+9.  **NextAuth Sets Session Cookie:** Stores the JWT in an HTTP-only cookie.
+10. **NextAuth Redirects:** Redirects to the `callbackUrl` (e.g., `/dashboard`).
+11. **User on `/dashboard`:** `useSession` on the client or `getSession` on the server can now read the session from the cookie.
+
+This setup provides a robust and type-safe authentication system in your Next.js application within your Turborepo.
