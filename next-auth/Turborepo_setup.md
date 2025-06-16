@@ -667,512 +667,150 @@ Your current `getServerSession(authOptions)` might work if `authOptions` implici
 This setup provides a robust and type-safe authentication system in your Next.js application within your Turborepo.
 ---
 ## Sharing session with backend app
-It's a great question! Sharing session state between your Next.js frontend (powered by NextAuth.js) and your separate Express.js HTTP server backend in a Turborepo is a common requirement for full-stack applications.
-
-NextAuth.js primarily uses **JSON Web Tokens (JWTs)** for its sessions by default (when `session.strategy` is set to `"jwt"`). This is excellent for cross-service authentication, as JWTs are stateless and can be validated independently.
-
-Here's how you can leverage the NextAuth.js session in your Express.js HTTP server's middleware:
-
-### 1. Understanding NextAuth.js JWTs
-
-When a user successfully logs in via NextAuth.js, a JWT is created and stored in an HTTP-only cookie in the user's browser. This cookie is automatically sent with every subsequent request from the browser to your Next.js application.
-
-The JWT contains the `token` object that you configured in your `jwt` callback (e.g., `id`, `email`, `name`, `picture`). This token is cryptographically signed using your `NEXTAUTH_SECRET`.
-
-### 2. Key Challenges for the Express Server
-
-* **Cookie Accessibility:** Your Express server *won't* automatically receive the NextAuth.js session cookie **if your Express server is on a different domain or port** than your Next.js app. This is a fundamental browser security restriction (Same-Origin Policy).
-* **JWT Verification:** Your Express server needs to be able to decode and verify the JWT using the *same `NEXTAUTH_SECRET`* that NextAuth.js uses.
-
-### 3. Solution Strategy: Pass JWT as a Bearer Token
-
-The most robust and secure way to share the session is to **extract the JWT from the cookie on the Next.js frontend and pass it as an `Authorization: Bearer <token>` header** to your Express.js API requests.
-
-This approach works regardless of whether your Next.js and Express apps are on the same domain/port, and it's a standard pattern for API authentication.
+To extract the **NextAuth token** in your **Next.js (frontend)** app and send it in the `Authorization` header to your **Express backend**, you can follow this setup:
 
 ---
 
-### Step-by-Step Implementation
+### ✅ Step-by-Step Plan
 
-#### A. Configure `next-auth` to retrieve the JWT (Frontend - `apps/nextjs-app`)
+#### 1. **Make sure your NextAuth session returns the token**
 
-You need a way to get the JWT client-side. The `getToken` utility from `next-auth/jwt` is perfect for this.
+In `authOptions`, use the `jwt` and `session` callbacks to include the user `id` or other claims:
 
-**Create a utility function or use it directly:**
+```ts
+// @repo/auth/nextAuth.ts
+import { AuthOptions } from "next-auth";
+import CredentialsProvider from "next-auth/providers/credentials";
 
-```typescript
-// apps/nextjs-app/utils/auth.ts (or directly in your component/API client)
-import { getToken } from 'next-auth/jwt';
-import { NextApiRequest } from 'next'; // Only if using in Next.js API routes
-
-const secret = process.env.NEXTAUTH_SECRET;
-
-export async function getJwtToken(req?: NextApiRequest) {
-  if (!secret) {
-    throw new Error("NEXTAUTH_SECRET is not defined");
-  }
-  // If `req` is provided (e.g., in a Next.js API route), getToken can read from headers/cookies
-  // Otherwise, it will try to read from the browser's context
-  const token = await getToken({ req: req || undefined, secret });
-  return token;
-}
-```
-
-#### B. Modify API Calls from Next.js to Express (Frontend - `apps/nextjs-app`)
-
-When your Next.js app makes requests to your Express.js HTTP server (e.g., `axios.get('http://localhost:8000/api/mydata')`), you need to include the JWT.
-
-```typescript
-// apps/nextjs-app/components/MyProtectedComponent.tsx (Client Component)
-'use client'; // if using App Router
-
-import { useState, useEffect } from 'react';
-import axios from 'axios';
-import { useSession } from 'next-auth/react'; // To ensure user is logged in
-import { getJwtToken } from '../utils/auth'; // Your utility to get the token
-
-export default function MyProtectedComponent() {
-  const { data: session, status } = useSession();
-  const [data, setData] = useState(null);
-  const [error, setError] = useState('');
-
-  useEffect(() => {
-    const fetchData = async () => {
-      if (status === 'authenticated') {
-        try {
-          const token = await getJwtToken(); // Get the JWT token
-          if (!token) {
-            setError('No authentication token found.');
-            return;
-          }
-
-          const response = await axios.get('http://localhost:8000/api/protected-data', {
-            headers: {
-              Authorization: `Bearer ${token.raw}`, // Use token.raw which is the actual JWT string
-            },
-          });
-          setData(response.data);
-        } catch (err: any) {
-          setError('Failed to fetch data: ' + err.message);
-        }
+export const authOptions: AuthOptions = {
+  providers: [
+    CredentialsProvider({
+      // your credentials logic here
+    })
+  ],
+  session: {
+    strategy: "jwt",
+  },
+  callbacks: {
+    async jwt({ token, user }) {
+      if (user) {
+        token.id = user.id;
+        token.email = user.email;
       }
-    };
-
-    fetchData();
-  }, [status]); // Re-fetch if auth status changes
-
-  if (status === 'loading') return <div>Loading...</div>;
-  if (status === 'unauthenticated') return <div>Please log in to view this content.</div>;
-  if (error) return <div>Error: {error}</div>;
-
-  return (
-    <div>
-      <h2>Protected Data from Express</h2>
-      {data ? <pre>{JSON.stringify(data, null, 2)}</pre> : <p>Loading data...</p>}
-    </div>
-  );
-}
-```
-
-#### C. Create Authentication Middleware in Express (`apps/http-server`)
-
-Your Express server needs to parse the `Authorization` header, verify the JWT, and attach the decoded user information to the `req` object.
-
-**1. Install Dependencies in `apps/http-server`:**
-
-```bash
-cd apps/http-server
-pnpm add jsonwebtoken dotenv
-pnpm add -D @types/jsonwebtoken @types/express
-```
-* `jsonwebtoken`: For verifying JWTs.
-* `dotenv`: To load your `NEXTAUTH_SECRET` from `.env`.
-
-**2. Create the Authentication Middleware:**
-
-```typescript
-// apps/http-server/src/middleware/auth.ts (create this file)
-import { Request, Response, NextFunction } from 'express';
-import jwt from 'jsonwebtoken';
-import dotenv from 'dotenv';
-
-dotenv.config(); // Load environment variables from .env
-
-const JWT_SECRET = process.env.NEXTAUTH_SECRET;
-
-// Extend the Request type to include user information
-declare global {
-  namespace Express {
-    interface Request {
-      user?: {
-        id: string;
-        email: string;
-        name?: string | null;
-        image?: string | null;
-        // Add any other properties you store in your NextAuth JWT token
-      };
+      return token;
+    },
+    async session({ session, token }) {
+      if (token) {
+        session.user.id = token.id as number;
+        session.user.email = token.email as string;
+      }
+      return session;
     }
-  }
-}
-
-export const authenticateToken = (req: Request, res: Response, next: NextFunction) => {
-  const authHeader = req.headers['authorization'];
-  const token = authHeader && authHeader.split(' ')[1]; // Bearer TOKEN
-
-  if (token == null) {
-    return res.sendStatus(401); // No token provided
-  }
-
-  if (!JWT_SECRET) {
-    console.error("JWT_SECRET is not defined in http-server environment.");
-    return res.status(500).send("Server configuration error.");
-  }
-
-  jwt.verify(token, JWT_SECRET, (err, user) => {
-    if (err) {
-      console.error("JWT verification failed:", err.message);
-      return res.sendStatus(403); // Token is invalid or expired
-    }
-    // 'user' here is the decoded payload of the JWT.
-    // Ensure it matches the structure you put in the NextAuth JWT callback.
-    // In NextAuth's `jwt` callback, `token` has `id`, `email`, `name`, `picture`.
-    // So, 'user' here will have those same properties.
-    req.user = user as Request['user']; // Attach the decoded user to the request
-    next(); // Proceed to the next middleware/route handler
-  });
+  },
+  secret: process.env.NEXTAUTH_SECRET,
 };
 ```
 
-#### D. Use the Middleware in Your Express App (`apps/http-server`)
-
-```typescript
-// apps/http-server/src/index.ts (or wherever your Express app is configured)
-import express from 'express';
-import cors from 'cors'; // Important for cross-origin requests
-import { authenticateToken } from './middleware/auth'; // Import your auth middleware
-
-const app = express();
-const port = process.env.PORT || 8000;
-
-app.use(express.json()); // For parsing JSON request bodies
-
-// Configure CORS
-app.use(cors({
-  origin: 'http://localhost:3000', // Allow requests from your Next.js app's origin
-  credentials: true, // Allow cookies/authorization headers to be sent
-}));
-
-app.get('/', (req, res) => {
-  res.send('Hello from Express HTTP Server!');
-});
-
-// Example protected route
-app.get('/api/protected-data', authenticateToken, (req, res) => {
-  // If we reach here, the token was valid, and req.user is populated
-  if (req.user) {
-    res.json({
-      message: 'This is protected data!',
-      userId: req.user.id,
-      userEmail: req.user.email,
-      userName: req.user.name,
-      // You can return sensitive data if appropriate, as the user is authenticated
-    });
-  } else {
-    // This case theoretically shouldn't be reached if authenticateToken works
-    res.status(500).json({ message: 'User not found in request context.' });
-  }
-});
-
-app.listen(port, () => {
-  console.log(`HTTP server listening on port ${port}`);
-});
-```
-
-#### E. Environment Variables for Express Server (`apps/http-server`)
-
-Create a `.env` file in your `apps/http-server` directory (or ensure it's loaded from your Turborepo root if you have a shared `.env` strategy).
-
-```
-# apps/http-server/.env
-PORT=8000
-NEXTAUTH_SECRET="YOUR_VERY_LONG_RANDOM_STRING_HERE" # MUST BE THE SAME AS YOUR NEXT.JS APP'S SECRET
-```
-
-### Key Considerations:
-
-1.  **`NEXTAUTH_SECRET` Consistency:** The `NEXTAUTH_SECRET` environment variable **must be identical** in both your Next.js application (`apps/nextjs-app/.env.local`) and your Express.js HTTP server (`apps/http-server/.env`). This is critical for JWT signing and verification.
-2.  **CORS:** Cross-Origin Resource Sharing (`cors` package in Express) is essential if your Next.js app and Express server run on different origins (different ports or domains). Configure it carefully to allow requests from your Next.js app's URL.
-3.  **`token.raw`:** When you get the token using `getToken` on the client, `token.raw` holds the actual JWT string that you need to send in the `Authorization` header.
-4.  **Error Handling:** Ensure robust error handling for failed token verification (e.g., returning 401 Unauthorized or 403 Forbidden).
-5.  **Typescript `Request` Augmentation:** The `declare global` block is necessary to tell TypeScript that your `Request` object will have a `user` property after the `authenticateToken` middleware runs.
-6.  **Refresh Tokens (Advanced):** For long-lived sessions, you might eventually look into refresh tokens if you want to avoid extremely long JWT expiration times, but for basic usage, NextAuth's default JWT strategy with reasonable `maxAge` is usually sufficient.
-7.  **WebSockets (`ws-server`):** For your WS server, you would typically pass the JWT token during the WebSocket connection handshake (e.g., as a query parameter or header when establishing the WS connection) and then verify it on the server side using `jsonwebtoken` similarly.
-
-This setup provides a secure and scalable way to authenticate requests to your Express.js backend using the NextAuth.js session.
-You've hit on a crucial point when integrating Next.js with separate Express.js servers in a monorepo: **sharing authentication state**. NextAuth.js primarily manages sessions for the Next.js application itself. To use that session information in your Express.js HTTP server, you need to either:
-
-1.  **Verify the NextAuth.js JWT on your Express.js server.** (Recommended and most common)
-2.  **Use a shared session store (like Redis) and make Express.js understand it.** (More complex)
-3.  **Use `@auth/express` (experimental).**
-
-Let's focus on **Option 1: Verifying the JWT**. This is the standard approach for stateless API servers.
-
-### Understanding NextAuth.js JWTs
-
-When you configure NextAuth.js with `session: { strategy: "jwt" }`, it doesn't store session data in a database by default. Instead, it creates a JSON Web Token (JWT) after a successful login. This JWT is then signed with your `NEXTAUTH_SECRET` and sent as an `HttpOnly` cookie to the client's browser.
-
-Crucially, this JWT contains the `token` object from your `jwt` callback in `authOptions`, which includes `user.id`, `user.email`, `user.name`, `user.picture`, and any other custom data you added.
-
-### Steps to Use NextAuth.js Session in Your Express.js HTTP Server
-
-**Goal:** Your Express.js middleware needs to:
-1.  Read the `next-auth.session-token` cookie from incoming requests.
-2.  Verify the JWT using the same `NEXTAUTH_SECRET` that NextAuth.js uses.
-3.  Decode the JWT to extract the user's information.
-4.  Attach this user information to the `req` object for subsequent route handlers to use.
+> This ensures your JWT has the necessary fields and is accessible on the frontend.
 
 ---
 
-### **1. Shared Secret Key (Critical)**
+#### 2. **Extract token on the client and send to Express**
 
-Both your Next.js app (via NextAuth.js) and your Express.js server **MUST** use the exact same `NEXTAUTH_SECRET` for signing and verifying JWTs.
+Use `getToken()` from `next-auth/jwt` **on the backend** (e.g., middleware), or `getSession()` / `getToken()` from `next-auth/react` **on the client**.
 
-**In your Turborepo:**
-* Make sure `NEXTAUTH_SECRET` is set in the `.env` file of your `apps/nextjs-app`.
-* **Also set `NEXTAUTH_SECRET` in the `.env` file (or equivalent configuration) of your `apps/http-server`.**
+But to get the raw JWT on the client, prefer `getToken()` from `next-auth/jwt` via a custom API route or use the session cookie manually.
 
-### **2. Install Dependencies in `apps/http-server`**
+Instead, here's a clean client-side way using `getSession()`:
 
-You'll need a JWT library to verify the token.
-`jsonwebtoken` is a popular choice.
+```ts
+// inside any client-side fetch call
+import { getSession } from "next-auth/react";
 
-```bash
-cd apps/http-server
-pnpm add jsonwebtoken dotenv
-pnpm add -D @types/jsonwebtoken # For TypeScript
-```
-* `dotenv` is for loading environment variables.
-
-### **3. Create an Authentication Middleware in `apps/http-server`**
-
-You'll create a middleware function that intercepts requests, extracts the JWT, verifies it, and attaches the user data.
-
-**`apps/http-server/src/middleware/auth.ts`**
-
-```typescript
-import { Request, Response, NextFunction } from 'express';
-import jwt from 'jsonwebtoken';
-import { JWT_VERIFICATION_ERROR } from '../utils/constants'; // Define this constant for clear errors
-
-// Extend the Request object to include the user property
-declare global {
-    namespace Express {
-        interface Request {
-            user?: {
-                id: string;
-                email: string;
-                name?: string | null;
-                image?: string | null;
-                // Add any other properties you added to your JWT token in NextAuth.js
-                // role?: string;
-            };
-        }
-    }
-}
-
-interface DecodedToken {
-    id: string;
-    email: string;
-    name?: string | null;
-    picture?: string | null; // NextAuth uses 'picture' in the JWT
-    iat: number;
-    exp: number;
-    // Add any other custom properties from your JWT
-    // role?: string;
-}
-
-export const authenticateToken = (req: Request, res: Response, next: NextFunction) => {
-    // 1. Get the session token from the cookies
-    // NextAuth.js uses either 'next-auth.session-token' or '__Secure-next-auth.session-token'
-    // depending on the environment (HTTPS vs HTTP) and configuration.
-    const token = req.cookies['next-auth.session-token'] || req.cookies['__Secure-next-auth.session-token'];
-
-    if (!token) {
-        return res.status(401).json({ message: 'Authentication required: No token provided' });
-    }
-
-    try {
-        // 2. Verify and decode the JWT
-        // Use the same NEXTAUTH_SECRET as in your Next.js app
-        const secret = process.env.NEXTAUTH_SECRET;
-
-        if (!secret) {
-            console.error('NEXTAUTH_SECRET is not defined in http-server environment.');
-            return res.status(500).json({ message: 'Server configuration error: Authentication secret missing.' });
-        }
-
-        const decoded = jwt.verify(token, secret) as DecodedToken;
-
-        // 3. Attach user information to the request object
-        req.user = {
-            id: decoded.id,
-            email: decoded.email,
-            name: decoded.name,
-            image: decoded.picture, // Map 'picture' from JWT back to 'image' for consistency
-            // role: decoded.role, // If you added a role
-        };
-
-        // 4. Proceed to the next middleware or route handler
-        next();
-
-    } catch (error) {
-        console.error('JWT Verification Error:', error);
-        // Handle token expiration, invalid token, etc.
-        if (error instanceof jwt.TokenExpiredError) {
-            return res.status(401).json({ message: 'Authentication required: Token expired' });
-        }
-        return res.status(401).json({ message: 'Authentication failed: Invalid token' });
-    }
-};
-
-// You might also want a separate file for constants, e.g., `apps/http-server/src/utils/constants.ts`
-// export const JWT_VERIFICATION_ERROR = 'Authentication failed: Invalid token';
-```
-
-### **4. Integrate the Middleware into Your Express.js App**
-
-In your main Express.js application file (`apps/http-server/src/index.ts` or similar):
-
-```typescript
-// apps/http-server/src/index.ts (or your main app file)
-import express from 'express';
-import dotenv from 'dotenv';
-import cookieParser from 'cookie-parser'; // Important: to parse cookies from the request
-import { authenticateToken } from './middleware/auth'; // Adjust path as needed
-
-// Load environment variables
-dotenv.config();
-
-const app = express();
-const PORT = process.env.PORT || 8000;
-
-// Middleware setup
-app.use(express.json()); // For parsing JSON request bodies
-app.use(cookieParser()); // Essential for accessing req.cookies
-
-// Example protected route
-app.get('/api/protected-data', authenticateToken, (req, res) => {
-    // If we reach here, the user is authenticated, and req.user is populated
-    if (req.user) {
-        res.json({
-            message: 'This is protected data!',
-            user: req.user,
-            data: { secretValue: 'You are authenticated!' }
-        });
-    } else {
-        // This case should ideally not happen if authenticateToken works correctly
-        res.status(500).json({ message: 'User information missing after authentication.' });
-    }
-});
-
-// Example unprotected route
-app.get('/api/public-data', (req, res) => {
-    res.json({ message: 'This is public data!' });
-});
-
-app.listen(PORT, () => {
-    console.log(`HTTP Server running on port ${PORT}`);
-});
-```
-
-### **5. Client-Side Interaction from Next.js App**
-
-When your Next.js frontend makes requests to your Express.js backend, the browser will automatically send the `next-auth.session-token` cookie with the request (because it's an HttpOnly cookie set by NextAuth.js on the same domain or a subdomain configured to share cookies).
-
-You don't need to manually attach headers or tokens in your `fetch` or `axios` calls from the Next.js app if they are on the same domain/subdomain.
-
-```typescript
-// apps/nextjs-app/src/components/SomeComponent.tsx
-'use client';
-
-import { useSession } from 'next-auth/react';
-import { useEffect, useState } from 'react';
-
-export default function SomeComponent() {
-  const { data: session } = useSession();
-  const [protectedData, setProtectedData] = useState(null);
-  const [error, setError] = useState(null);
-
-  useEffect(() => {
-    const fetchProtectedData = async () => {
-      if (session) {
-        try {
-          // Assuming your Express server is on a different port but same base domain
-          // Or a subdomain configured to share cookies
-          // e.g., Next.js on localhost:3000, Express on localhost:8000
-          const response = await fetch('http://localhost:8000/api/protected-data');
-
-          if (!response.ok) {
-            // Handle 401, 403 etc.
-            const errData = await response.json();
-            throw new Error(errData.message || 'Failed to fetch protected data');
-          }
-
-          const data = await response.json();
-          setProtectedData(data);
-        } catch (err: any) {
-          setError(err.message);
-        }
-      }
-    };
-
-    fetchProtectedData();
-  }, [session]); // Re-run when session changes
+export async function callExpressAPI() {
+  const session = await getSession();
 
   if (!session) {
-    return <div>Please log in to see protected data.</div>;
+    throw new Error("User not authenticated");
   }
 
-  if (error) {
-    return <div>Error fetching data: {error}</div>;
-  }
+  const res = await fetch("http://localhost:4000/protected-route", {
+    method: "GET",
+    headers: {
+      Authorization: `Bearer ${session.accessToken}`, // 👈 OR use your own jwt
+    },
+  });
 
-  return (
-    <div>
-      <h2>Protected Data from Express Server:</h2>
-      {protectedData ? (
-        <pre>{JSON.stringify(protectedData, null, 2)}</pre>
-      ) : (
-        <div>Loading protected data...</div>
-      )}
-    </div>
-  );
+  const data = await res.json();
+  return data;
 }
 ```
 
-### Key Considerations for Turborepo and Monorepo:
+⚠️ **BUT:** `getSession()` does not return the JWT token unless you manually add it in the session callback. You can expose the JWT like this:
 
-1.  **Environment Variables:** Ensure `NEXTAUTH_SECRET` is consistently available to both your Next.js app and your Express.js app. Using a shared `.env` or a robust env management system for your Turborepo is crucial.
-2.  **CORS:** If your Next.js app and Express.js server are running on *different origins* (e.g., `localhost:3000` and `localhost:8000`), you will encounter Cross-Origin Resource Sharing (CORS) issues.
-    * You'll need to configure your Express.js server to allow CORS requests from your Next.js app's origin.
-    * **Crucially for cookies:** You must set `credentials: 'include'` in your client-side `fetch` or `axios` calls and ensure your CORS configuration on the Express.js server explicitly allows credentials (`Access-Control-Allow-Credentials: true`).
+```ts
+async session({ session, token }) {
+  session.accessToken = token.accessToken; // 👈 Add this!
+  return session;
+}
+```
 
-    ```typescript
-    // apps/http-server/src/index.ts (CORS example)
-    import cors from 'cors'; // npm install cors
+Make sure to type your `Session` object to include `accessToken`:
 
-    // ...
-    app.use(cookieParser());
+```ts
+declare module "next-auth" {
+  interface Session {
+    user: {
+      id: number;
+      email: string;
+      photo: string;
+      name: string;
+    };
+    accessToken?: string; // 👈 custom token field
+  }
+}
+```
 
-    app.use(cors({
-        origin: 'http://localhost:3000', // Your Next.js app's origin
-        credentials: true, // Allow cookies to be sent
-    }));
-    // ...
-    ```
+---
 
-3.  **Domain/Subdomain Consistency:** For `HttpOnly` cookies to be sent automatically across different ports, they generally need to be on the same base domain or a common subdomain.
-    * If running locally, `localhost` typically works across different ports.
-    * In production, if `nextjs.yourdomain.com` and `api.yourdomain.com`, you'd need to configure NextAuth's cookie domain (usually done by setting `NEXTAUTH_URL` correctly) and ensure your Express.js server is listening on the appropriate subdomain.
+#### 3. **Handle the token in Express middleware**
 
-By following these steps, you can effectively use the authentication state managed by NextAuth.js in your Next.js application to secure routes and access user information in your separate Express.js HTTP server.
+On your **Express backend**, use a middleware like this:
+
+```ts
+// middleware/auth.js
+import jwt from "jsonwebtoken";
+
+export function authMiddleware(req, res, next) {
+  const authHeader = req.headers["authorization"];
+  const token = authHeader?.split(" ")[1];
+
+  if (!token) {
+    return res.status(401).json({ error: "Token missing" });
+  }
+
+  try {
+    const decoded = jwt.verify(token, process.env.NEXTAUTH_SECRET); // 👈 Must match the NextAuth secret
+    req.user = decoded;
+    next();
+  } catch (err) {
+    res.status(403).json({ error: "Invalid token" });
+  }
+}
+```
+
+---
+
+### ✅ Summary
+
+| Layer                           | Purpose                                    |
+| ------------------------------- | ------------------------------------------ |
+| `next-auth`                     | Generates a JWT and includes it in session |
+| `getSession()`                  | Extracts session on client                 |
+| `session.accessToken`           | Exposes token on frontend                  |
+| `Authorization: Bearer <token>` | Sends to Express                           |
+| Express middleware              | Verifies JWT using the same secret         |
+
+---
+
+Let me know if you want to avoid JWT and use cookies instead, or want an example with **`next-auth/jwt`** for server-side extraction.
