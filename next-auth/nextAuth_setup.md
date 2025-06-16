@@ -124,6 +124,44 @@ export const authOptions: NextAuthOptions = {
 [Login Page](https://github.com/hiaayush30/imagekit-wallpaper-store/blob/main/src/app/(auth)/login/page.tsx)
 
 ---
+### Add SessionProvider
+```typescript
+// app/layout.tsx
+import { SessionProvider } from './SessionProvider'; // Custom client component wrapper
+import './globals.css'; // Your global styles
+
+export default function RootLayout({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
+  return (
+    <html lang="en">
+      <body>
+        <SessionProvider>{children}</SessionProvider>
+      </body>
+    </html>
+  );
+}
+
+// app/SessionProvider.tsx (Needs to be a client component for useSession)
+'use client'; // This directive marks it as a client component
+import { SessionProvider as NextAuthSessionProvider } from 'next-auth/react';
+import React from 'react';
+
+interface Props {
+  children: React.ReactNode;
+}
+
+export default function SessionProvider({ children }: Props) {
+  return (
+    <NextAuthSessionProvider>
+      {children}
+    </NextAuthSessionProvider>
+  );
+}
+```
+---
 ### Create the login and register api
 - src/app/api/auth/register/route.ts
 ```typescript
