@@ -3,7 +3,6 @@
 - src/types/next-auth.d.ts
 
 ```typescript
-import "next-auth";
 import { DefaultSession } from "next-auth";
 declare module "next-auth" {
     // When a user signs in, NextAuth.js creates a Session object that contains information about the user.
@@ -11,32 +10,39 @@ declare module "next-auth" {
     // available on Client-side and server-side.
     interface Session {
         user: {
-            id: string;
-            role: string;
+            id: number;
+            email: string;
+            username: string;
+            profilePic: string;
         } & DefaultSession['user']; //name, email, image
-        // This means the user object in your Session will now have all the default properties plus your
-        // custom id, role properties.
     }
     interface User {
         // Represents the structure of a user record as stored in your database or authentication provider.
         // Primarily server side when interacting with your database to fetch, create, or update user information.
-        id:string;
+        id: number;
         email: string;
-        role: string;
+        profilePic: string;
+        username: string;
     }
 }
 ```
 ### Define auth options for next-auth
 - src/lib/auth.ts
 ```typescript
-import CredentialsProvider from "next-auth/providers/credentials";
-import connectDb from "./db";
-import bcrypt from "bcryptjs";
-import { NextAuthOptions } from "next-auth";
-import User from "@/models/user.model";
+// boilerplate code for implementing custom db implementation using google and credentials provider
 
-export const authOptions: NextAuthOptions = {
+import { AuthOptions } from "next-auth";
+import GoogleProvider from "next-auth/providers/google";
+import CredentialsProvider from "next-auth/providers/credentials";
+import bcrypt from "bcryptjs";
+import { prisma } from "@/lib/prisma";
+
+export const authOptions: AuthOptions = {
     providers: [
+        GoogleProvider({
+            clientId: process.env.GOOGLE_CLIENT_ID!,
+            clientSecret: process.env.GOOGLE_CLIENT_SECRET!
+        }),
         CredentialsProvider({
             name: "Credentials",
             credentials: {
@@ -48,9 +54,10 @@ export const authOptions: NextAuthOptions = {
                     throw new Error('invalid credentials')
                 }
                 try {
-                    await connectDb();
-                    const user = await User.findOne({
-                        email: credentials.email
+                    const user = await prisma.user.findFirst({
+                        where: {
+                            email: credentials.email
+                        }
                     })
                     if (!user) {
                         throw new Error('user not found')
@@ -60,9 +67,11 @@ export const authOptions: NextAuthOptions = {
                         throw new Error('incorrect password');
                     }
                     return {
-                        id: user._id as string,
+                        id: user.id,
                         email: user.email,
-                        role: user.role
+                        photo: user.profilePic,
+                        username: user.username,
+                        profilePic: user.profilePic
                     }
                 } catch (error) {
                     console.error('Auth Error', error);
@@ -82,37 +91,39 @@ export const authOptions: NextAuthOptions = {
             if (user) {
                 token.id = user.id;
                 token.email = user.email;
-                token.role = user.role;
+                token.profilePic = user.profilePic;
+                token.username = user.username
             }
             else if (profile) {
-                const foundUser = await User.findOne({
+                const foundUser = await prisma.user.findFirst({
                     where: {
                         email: profile.email
                     }
                 })
                 if (foundUser) {
-                    token.id = foundUser.id;
+                    token.id = foundUser.id as number;
                     token.email = foundUser.email;
-                    token.role = foundUser.role;
+                    token.photo = foundUser.profilePic;
+                    token.username = foundUser.username;
                 }
             }
             return token
         },
         async session({ session, token }) { //extract whatever you need from the token
-            session.user.id = token.id as string;
-            session.user.role = token.role as string;
+            session.user.id = token.id as number;
+            session.user.profilePic = token.photo as string;
             session.user.email = token.email as string;
+            session.user.username = token.name as string;
             return session
         }
     },
     pages: {
-        signIn:'/login',
+        signIn: '/login',
         error: '/login'
     },
     secret: process.env.NEXTAUTH_SECRET
 }
 ```
----
 ### Create the signup and login pages
 #### src/app/(auth)/
 - register/page.tsx
